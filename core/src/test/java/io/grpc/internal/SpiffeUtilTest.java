@@ -233,6 +233,9 @@ public class SpiffeUtilTest {
     private static final String SPIFFE_TRUST_BUNDLE_MISSING_X5C = "spiffebundle_missing_x5c.json";
     private static final String SPIFFE_TRUST_BUNDLE_EMPTY_X5C = "spiffebundle_empty_x5c.json";
     private static final String SPIFFE_TRUST_BUNDLE_IGNORED_KEYS = "spiffebundle_ignored_keys.json";
+    private static final String SPIFFE_TRUST_BUNDLE_MIXED_KEYS = "spiffebundle_mixed_keys.json";
+    private static final String SPIFFE_TRUST_BUNDLE_EMPTY_TRUST_DOMAINS =
+        "spiffebundle_empty_trust_domains.json";
     private static final String DOMAIN_ERROR_MESSAGE =
         " Certificate loading for trust domain 'google.com' failed.";
 
@@ -381,6 +384,45 @@ public class SpiffeUtilTest {
     }
 
     @Test
+    public void loadTrustBundleFromFileWithNonX509SvidJwkEntriesSuccessTest() throws Exception {
+      // Per the SPIFFE bundle spec, JWK entries with a missing or unknown 'use' or an unknown
+      // 'kty' MUST be ignored, so a bundle map that also carries jwt-svid keys (which require
+      // 'kid' and may use other key types) loads successfully.
+      SpiffeBundle tb = SpiffeUtil.loadTrustBundleFromFile(
+          copyFileToTmp(SPIFFE_TRUST_BUNDLE_MIXED_KEYS));
+      assertEquals(1, tb.getSequenceNumbers().size());
+      assertEquals(123L, (long) tb.getSequenceNumbers().get("google.com"));
+      assertEquals(1, tb.getBundleMap().size());
+      assertEquals(1, tb.getBundleMap().get("google.com").size());
+      Optional<SpiffeId> spiffeId = SpiffeUtil.extractSpiffeId(
+          tb.getBundleMap().get("google.com").toArray(new X509Certificate[0]));
+      assertTrue(spiffeId.isPresent());
+      assertEquals("foo.bar.com", spiffeId.get().getTrustDomain());
+
+      // Entries with a missing 'use'/'kty' are ignored.
+      tb = SpiffeUtil.loadTrustBundleFromFile(copyFileToTmp(SPIFFE_TRUST_BUNDLE_WRONG_KTY));
+      assertEquals(1, tb.getSequenceNumbers().size());
+      assertEquals(123L, (long) tb.getSequenceNumbers().get("google.com"));
+      assertEquals(1, tb.getBundleMap().size());
+      assertEquals(0, tb.getBundleMap().get("google.com").size());
+
+      // Entries with an unknown 'use' are ignored.
+      tb = SpiffeUtil.loadTrustBundleFromFile(copyFileToTmp(SPIFFE_TRUST_BUNDLE_WRONG_USE));
+      assertEquals(1, tb.getBundleMap().size());
+      assertEquals(0, tb.getBundleMap().get("google.com").size());
+    }
+
+    @Test
+    public void loadTrustBundleFromFileWithEmptyTrustDomainsSuccessTest() throws Exception {
+      // An empty "trust_domains" element is valid per the SPIFFE bundle spec and means that
+      // no trust domain is trusted.
+      SpiffeBundle tb = SpiffeUtil.loadTrustBundleFromFile(
+          copyFileToTmp(SPIFFE_TRUST_BUNDLE_EMPTY_TRUST_DOMAINS));
+      assertTrue(tb.getSequenceNumbers().isEmpty());
+      assertTrue(tb.getBundleMap().isEmpty());
+    }
+
+    @Test
     public void loadTrustBundleFromFileFailureTest() {
       // Check the exception if JSON root element is different from 'trust_domains'
       NullPointerException npe = assertThrows(NullPointerException.class, () -> SpiffeUtil
@@ -402,21 +444,10 @@ public class SpiffeUtilTest {
       iae = assertThrows(IllegalArgumentException.class, () -> SpiffeUtil
           .loadTrustBundleFromFile(copyFileToTmp(SPIFFE_TRUST_BUNDLE_CORRUPTED_CERT)));
       assertEquals("Certificate can't be parsed." + DOMAIN_ERROR_MESSAGE, iae.getMessage());
-      // Check the exception if 'kty' value differs from 'RSA'
-      iae = assertThrows(IllegalArgumentException.class, () -> SpiffeUtil
-          .loadTrustBundleFromFile(copyFileToTmp(SPIFFE_TRUST_BUNDLE_WRONG_KTY)));
-      assertEquals(
-          "'kty' parameter must be one of [RSA, EC] but 'null' found." + DOMAIN_ERROR_MESSAGE,
-          iae.getMessage());
-      // Check the exception if 'kid' has a value
+      // Check the exception if an x509-svid JWK entry has 'kid' set
       iae = assertThrows(IllegalArgumentException.class, () -> SpiffeUtil
           .loadTrustBundleFromFile(copyFileToTmp(SPIFFE_TRUST_BUNDLE_WRONG_KID)));
       assertEquals("'kid' parameter must not be set." + DOMAIN_ERROR_MESSAGE, iae.getMessage());
-      // Check the exception if 'use' value differs from 'x509-svid'
-      iae = assertThrows(IllegalArgumentException.class, () -> SpiffeUtil
-          .loadTrustBundleFromFile(copyFileToTmp(SPIFFE_TRUST_BUNDLE_WRONG_USE)));
-      assertEquals("'use' parameter must be 'x509-svid' but 'i_am_not_x509-svid' found."
-          + DOMAIN_ERROR_MESSAGE, iae.getMessage());
     }
 
     @Test

@@ -157,12 +157,18 @@ public final class SpiffeUtil {
   /**
    * Loads a SPIFFE trust bundle from a file, parsing it from the JSON format.
    * In case of success, returns {@link SpiffeBundle}.
-   * If any element of the JSON content is invalid or unsupported, an
-   * {@link IllegalArgumentException} is thrown and the entire Bundle is considered invalid.
+   * JWK entries that do not represent X509-SVID keys are ignored, as required by the SPIFFE
+   * bundle spec: entries with a missing or unknown {@code use} parameter (such as jwt-svid
+   * keys, which are commonly published alongside x509-svid keys) or with an unknown
+   * {@code kty} parameter MUST be ignored by consumers. For any other invalid or unsupported
+   * element, e.g. an x509-svid entry with the {@code kid} parameter set or an unparseable
+   * certificate, an {@link IllegalArgumentException} is thrown and the entire Bundle is
+   * considered invalid.
    *
    * @param trustBundleFile the file path to the JSON file containing the trust bundle
-   * @see <a href="https://github.com/spiffe/spiffe/blob/main/standards/SPIFFE_Trust_Domain_and_Bundle.md">JSON format</a>
-   * @see <a href="https://github.com/spiffe/spiffe/blob/main/standards/X509-SVID.md#61-publishing-spiffe-bundle-elements">JWK entry format</a>
+   * @see <a href="https://github.com/spiffe/spiffe/blob/main/standards/SPIFFE_Trust_Domain_and_Bundle.md">Standard</a>
+   * @see <a href="https://github.com/spiffe/spiffe/blob/main/standards/SPIFFE_Trust_Domain_and_Bundle.md#413-keys">Keys parameter</a>
+   * @see <a href="https://github.com/spiffe/spiffe/blob/main/standards/X509-SVID.md#62-consuming-a-spiffe-bundle">Consuming a SPIFFE bundle</a>
    * @see <a href="https://datatracker.ietf.org/doc/html/rfc7517#appendix-B">x5c (certificate) parameter</a>
    */
   public static SpiffeBundle loadTrustBundleFromFile(String trustBundleFile) throws IOException {
@@ -199,37 +205,38 @@ public final class SpiffeUtil {
     @SuppressWarnings("unchecked")
     Map<String, ?> root = (Map<String, ?>)jsonObject;
     Map<String, ?> trustDomainsNode = JsonUtil.getObject(root, "trust_domains");
+    // An empty "trust_domains" element is valid and means that no trust domain is trusted.
     checkNotNull(trustDomainsNode, "Mandatory trust_domains element is missing");
-    checkArgument(trustDomainsNode.size() > 0, "Mandatory trust_domains element is missing");
     return trustDomainsNode;
   }
 
-  private static void checkJwkEntry(Map<String, ?> jwkNode, String trustDomainName) {
-    String kty = JsonUtil.getString(jwkNode, "kty");
-    if (kty == null || !KTY_PARAMETER_VALUES.contains(kty)) {
-      throw new IllegalArgumentException(
-          String.format(
-              "'kty' parameter must be one of %s but '%s' "
-                  + "found. Certificate loading for trust domain '%s' failed.",
-              KTY_PARAMETER_VALUES, kty, trustDomainName));
-    }
-    if (jwkNode.containsKey("kid")) {
-      throw new IllegalArgumentException(String.format("'kid' parameter must not be set. "
-              + "Certificate loading for trust domain '%s' failed.", trustDomainName));
-    }
+  /**
+   * Returns true if the JWK entry represents an X509-SVID key, i.e. its {@code use} parameter
+   * is {@code x509-svid} and its {@code kty} parameter is a supported key type. Per the
+   * SPIFFE bundle spec, consumers encountering a missing or unknown {@code use} or an
+   * unknown {@code kty} MUST ignore the entire JWK element; e.g. a bundle map may carry
+   * jwt-svid keys alongside the x509-svid keys of the same trust domain.
+   */
+  private static boolean isX509SvidJwkEntry(Map<String, ?> jwkNode) {
     String use = JsonUtil.getString(jwkNode, "use");
     if (use == null || !use.equals(USE_PARAMETER_VALUE)) {
-      throw new IllegalArgumentException(String.format("'use' parameter must be '%s' but '%s' "
-              + "found. Certificate loading for trust domain '%s' failed.", USE_PARAMETER_VALUE,
-          use, trustDomainName));
+      return false;
     }
+    String kty = JsonUtil.getString(jwkNode, "kty");
+    return kty != null && KTY_PARAMETER_VALUES.contains(kty);
   }
 
   private static List<X509Certificate> extractCert(List<Map<String, ?>> keysNode,
       String trustDomainName) {
     List<X509Certificate> result = new ArrayList<>();
     for (Map<String, ?> keyNode : keysNode) {
-      checkJwkEntry(keyNode, trustDomainName);
+      if (!isX509SvidJwkEntry(keyNode)) {
+        continue;
+      }
+      if (keyNode.containsKey("kid")) {
+        throw new IllegalArgumentException(String.format("'kid' parameter must not be set. "
+            + "Certificate loading for trust domain '%s' failed.", trustDomainName));
+      }
       List<String> rawCerts = JsonUtil.getListOfStrings(keyNode, "x5c");
       if (rawCerts == null || rawCerts.isEmpty()) {
         continue;
